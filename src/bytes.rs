@@ -150,6 +150,7 @@ pub struct Bytes {
 /// ```
 pub struct BytesMut {
     inner: Inner,
+    auto_expand_size: usize,
 }
 
 // Both `Bytes` and `BytesMut` are backed by `Inner` and functions are delegated
@@ -785,7 +786,7 @@ impl Bytes {
     /// ```
     pub fn try_mut(mut self) -> Result<BytesMut, Bytes> {
         if self.inner.is_mut_safe() {
-            Ok(BytesMut { inner: self.inner })
+            Ok(BytesMut { inner: self.inner, auto_expand_size: crate::DEFAULT_AUTO_EXPAND_SIZE })
         } else {
             Err(self)
         }
@@ -823,7 +824,7 @@ impl Bytes {
                 bytes_mut
             },
             Err(bytes) => {
-                let mut bytes_mut = BytesMut::with_capacity(new_cap);
+                let mut bytes_mut = BytesMut::with_capacity(new_cap, crate::DEFAULT_AUTO_EXPAND_SIZE);
                 bytes_mut.put_slice(&bytes);
                 bytes_mut.put_slice(extend);
                 bytes_mut
@@ -909,7 +910,7 @@ impl FromIterator<u8> for BytesMut {
         let iter = into_iter.into_iter();
         let (min, maybe_max) = iter.size_hint();
 
-        let mut out = BytesMut::with_capacity(maybe_max.unwrap_or(min));
+        let mut out = BytesMut::with_capacity(maybe_max.unwrap_or(min), crate::DEFAULT_AUTO_EXPAND_SIZE);
 
         for i in iter {
             out.reserve(1);
@@ -1017,7 +1018,7 @@ impl Extend<u8> for Bytes {
         let mut bytes_mut = match mem::replace(self, Bytes::new()).try_mut() {
             Ok(bytes_mut) => bytes_mut,
             Err(bytes) => {
-                let mut bytes_mut = BytesMut::with_capacity(bytes.len() + lower);
+                let mut bytes_mut = BytesMut::with_capacity(bytes.len() + lower, crate::DEFAULT_AUTO_EXPAND_SIZE);
                 bytes_mut.put_slice(&bytes);
                 bytes_mut
             }
@@ -1066,9 +1067,10 @@ impl BytesMut {
     /// assert_eq!(&bytes[..], b"hello world");
     /// ```
     #[inline]
-    pub fn with_capacity(capacity: usize) -> BytesMut {
+    pub fn with_capacity(capacity: usize, auto_expand_size: usize) -> BytesMut {
         BytesMut {
             inner: Inner::with_capacity(capacity),
+            auto_expand_size
         }
     }
 
@@ -1093,7 +1095,7 @@ impl BytesMut {
     /// ```
     #[inline]
     pub fn new() -> BytesMut {
-        BytesMut::with_capacity(0)
+        BytesMut::with_capacity(0, crate::DEFAULT_AUTO_EXPAND_SIZE)
     }
 
     /// Returns the number of bytes contained in this `BytesMut`.
@@ -1199,6 +1201,7 @@ impl BytesMut {
     pub fn split_off(&mut self, at: usize) -> BytesMut {
         BytesMut {
             inner: self.inner.split_off(at),
+            auto_expand_size: self.auto_expand_size,
         }
     }
 
@@ -1269,6 +1272,7 @@ impl BytesMut {
 
         BytesMut {
             inner: self.inner.split_to(at),
+            auto_expand_size: self.auto_expand_size,
         }
     }
 
@@ -1515,6 +1519,15 @@ impl BytesMut {
             self.extend_from_slice(&other);
         }
     }
+
+    #[inline]
+    fn auto_expand(&mut self, additional: usize) {
+        let additional = additional.max(self.auto_expand_size);
+
+        if self.remaining_mut() < additional {
+            self.reserve(additional);
+        }
+    }
 }
 
 impl BufMut for BytesMut {
@@ -1539,8 +1552,39 @@ impl BufMut for BytesMut {
         &mut self.inner.as_raw()[len..]
     }
 
+    // copy from bytes.rs
+    fn put<T: IntoBuf>(&mut self, src: T) where Self: Sized {
+        let mut src = src.into_buf();
+
+        // auto expand by marsqing
+        self.auto_expand(src.remaining());
+
+        assert!(self.remaining_mut() >= src.remaining());
+
+        while src.has_remaining() {
+            let l;
+
+            unsafe {
+                let s = src.bytes();
+                let d = self.bytes_mut();
+                l = cmp::min(s.len(), d.len());
+
+                ptr::copy_nonoverlapping(
+                    s.as_ptr(),
+                    d.as_mut_ptr(),
+                    l);
+            }
+
+            src.advance(l);
+            unsafe { self.advance_mut(l); }
+        }
+    }
+
     #[inline]
     fn put_slice(&mut self, src: &[u8]) {
+        // auto expand by marsqing
+        self.auto_expand(src.len());
+
         assert!(self.remaining_mut() >= src.len());
 
         let len = src.len();
@@ -1553,6 +1597,9 @@ impl BufMut for BytesMut {
 
     #[inline]
     fn put_u8(&mut self, n: u8) {
+        // auto expand by marsqing
+        self.auto_expand(1);
+
         self.inner.put_u8(n);
     }
 
@@ -1611,6 +1658,7 @@ impl From<Vec<u8>> for BytesMut {
     fn from(src: Vec<u8>) -> BytesMut {
         BytesMut {
             inner: Inner::from_vec(src),
+            auto_expand_size: crate::DEFAULT_AUTO_EXPAND_SIZE,
         }
     }
 }
@@ -1638,6 +1686,7 @@ impl<'a> From<&'a [u8]> for BytesMut {
 
                 BytesMut {
                     inner: inner,
+                    auto_expand_size: crate::DEFAULT_AUTO_EXPAND_SIZE,
                 }
             }
         } else {

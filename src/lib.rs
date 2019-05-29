@@ -103,3 +103,5 @@ pub mod serde;
 // Optional `Either` support
 #[cfg(feature = "either")]
 mod either;
+
+const DEFAULT_AUTO_EXPAND_SIZE: usize = 1024;

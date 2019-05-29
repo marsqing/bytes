@@ -110,7 +110,7 @@ impl FromBuf for BytesMut {
         where T: IntoBuf
     {
         let buf = buf.into_buf();
-        let mut ret = BytesMut::with_capacity(buf.remaining());
+        let mut ret = BytesMut::with_capacity(buf.remaining(), crate::DEFAULT_AUTO_EXPAND_SIZE);
         ret.put(buf);
         ret
     }
